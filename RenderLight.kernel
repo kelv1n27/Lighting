@@ -1,0 +1,47 @@
+__kernel void RenderLight(__global int* dest, __global int* texture, __global int* normals, const int2 destSize, const int2 lightPos, const uint radius, const uint color, const float lightDir, const float angleWidth, const float angularSharpness, const float lightIntensity, const float lightVolume, const float4 influences){
+	//distance/radial falloff
+	int2 currentPos = (int2)(lightPos.x + (get_global_id(0) - radius), lightPos.y + (get_global_id(1) - radius));
+	if (currentPos.x < 0 || currentPos.x >= destSize.x || currentPos.y < 0 ||currentPos.y >= destSize.y){
+		return;
+	}
+	int2 dists = (int2)(currentPos.x - lightPos.x, currentPos.y - lightPos.y);
+	float dist = sqrt((float)((dists.x * dists.x) + (dists.y * dists.y)));
+	float distFalloff = 1 - (dist/radius);
+	distFalloff += (1 - influences.x) * (1 - distFalloff);
+	
+	//angular falloff
+	float2 normPosVec = (float2)(dists.x/dist, dists.y/dist);
+	float2 normLightVec = (float2)(sin(lightDir * 0.01745f), cos(lightDir * 0.01745f)); //0.01745 approximates pi/180, converts degrees to radians
+	float angleDotProd = dot(normPosVec, normLightVec);
+	float2 angleWidthVec = (float2)(sin((lightDir + (angleWidth/2)) * 0.01745f), cos((lightDir + (angleWidth/2)) * 0.01745f));
+	float angleWidthDotProd = dot(normLightVec, angleWidthVec);
+	float angleFalloff = smoothstep(angleWidthDotProd, 1, angleDotProd);
+	float sharpeningFactor = (1/(angleFalloff + (1-angularSharpness))) * (1 + sharpeningFactor);//would be way faster as a linear multiplier and then clamped, but this is just cooler math
+	angleFalloff *= sharpeningFactor;
+	angleFalloff += (1 - influences.y) * (1 - angleFalloff);
+	
+	//normal falloff
+	int4 normal = (int4)((normals[currentPos.x + (currentPos.y * destSize.x)] >> 24) & 0xff, //alpha channel, impact of normal
+		((normals[currentPos.x + (currentPos.y * destSize.x)] >> 16) & 0xff) - 128, //red channel, normal x component
+		((normals[currentPos.x + (currentPos.y * destSize.x)] >> 8) & 0xff) - 128, //green channel, normal y component
+		((normals[currentPos.x + (currentPos.y * destSize.x)] >> 0) & 0xff) - 128); //blue channel, currently unused
+	float normMag = sqrt((float)((normal.y * normal.y) + (normal.z * normal.z)));
+	if (normMag == 0) normMag = 1;//prevents divide by 0, don't know if necessary.
+	float2 normVec = (float2)(-normal.y/normMag, normal.z/normMag);
+	float normDotProd = dot(normPosVec, normVec);
+	float normalFalloff = clamp(normDotProd + ((1 - (normal.x/255.0f)) * (1 - normDotProd)), 0.0f, 1.0f);
+	normalFalloff += (1 - influences.z) * (1 - normalFalloff);
+
+	//final calculations	
+	float finalIntensity = lightIntensity * distFalloff * angleFalloff * normalFalloff;
+	float4 lightColor = (float4)(1, finalIntensity * (((color >> 16) & 0xff)/255), finalIntensity * (((color >> 8) & 0xff)/255), finalIntensity * (((color >> 0) & 0xff)/255));
+	int4 textureARGB = (int4)(texture[currentPos.x + (currentPos.y * destSize.x)] >> 24, ((texture[currentPos.x + (currentPos.y * destSize.x)] >> 16) & 0xff) * lightColor.y, ((texture[currentPos.x + (currentPos.y * destSize.x)] >> 8) & 0xff) * lightColor.w, ((texture[currentPos.x + (currentPos.y * destSize.x)] >> 0) & 0xff) * lightColor.z);
+	int4 destARGB = (int4)(dest[currentPos.x + (currentPos.y * destSize.x)] >> 24, ((dest[currentPos.x + (currentPos.y * destSize.x)] >> 16) & 0xff) + textureARGB.y, ((dest[currentPos.x + (currentPos.y * destSize.x)] >> 8) & 0xff) + textureARGB.z, ((dest[currentPos.x + (currentPos.y * destSize.x)] >> 0) & 0xff) + textureARGB.w);
+	
+	//light volume
+	destARGB.y =  clamp((int)(destARGB.y + (lightColor.y * lightVolume * 255)), 0, 255);
+	destARGB.z = clamp((int)(destARGB.z + (lightColor.z * lightVolume * 255)), 0, 255);
+	destARGB.w = clamp((int)(destARGB.w + (lightColor.w * lightVolume * 255)), 0, 255);
+	
+	dest[currentPos.x + (currentPos.y * destSize.x)] = (destARGB.x << 24) + (destARGB.y << 16) + (destARGB.z << 8) + destARGB.w;
+}
